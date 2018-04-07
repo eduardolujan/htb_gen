@@ -10,7 +10,7 @@ Summary
 * Where it works 
 * Some Tecnical details
 
-##Description
+## Description
 htb-gen is meant to be an easy, scalable, yet powerfull,  bandwidth 
 management tool. You can set up/down portions of bandwith for each 
 host or network, that goes trough your router/firewall. 
@@ -24,10 +24,10 @@ All bash based so it can be used in embedded routers/firewalls
 (wired/wireless). 
 The packet clasification is done by iptables
   
-##Download
+## Download
  http://www.freshmeat.net/projects/htb-gen/
 
-##Requirements
+## Requirements
 * bash
 * QoS htb kernel support
 * iproute2 tc 
