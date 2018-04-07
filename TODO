@@ -1,0 +1,13 @@
+-Make a full-featured Web-Frontend
+-Make an on-line htb-gen compiler, to let people try it without 
+ install, and to use with embebed routers like openwrt.
+ Just Copy & Paste & run
+-Maybe add a weight syntax in the rate, so you can set:
+   - The manual rate
+   - Auto rate
+   - Auto rate with a weigth, like w4 w5 (rate 0 means w1), really nice for ISPs
+
+-Whant to help?, need:
+ -Voluntier to package a RedHat oriented rpm version, not just an aliened .deb
+ -Voluntier to maintain a Debian packet of this
+ -Voluntier to correct my ofensive english along doc/scripts (sorry im argentinian!)

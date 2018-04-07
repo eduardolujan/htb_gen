@@ -1,0 +1,266 @@
+#!/bin/bash
+#       Program: htb-gen
+#       Version: 0.9.0
+#   Description: Script to automate multi host bandwidth managment
+#           URL: http://www.freshmeat.net/projects/htb-gen/ 
+#        Author: Luciano Ruete <luciano _at_ praga.org.ar>
+#       License: GPLv2+
+#
+#Script begins --here!-- don't touch bellow this line... but, if you do, mail me! :-)
+source "/etc/htb-gen/htb-gen.conf"
+
+#easy path adaptation
+: ${iptables_command:="/sbin/iptables"}
+: ${iptables_save_command:="/sbin/iptables-save"}
+: ${iptables_restore_command:="/sbin/iptables-restore"} 
+: ${tc_command:="/sbin/tc"}
+
+#set -x
+test -r $htb_gen_rates_conf || { echo "rates config file not found: $htb_gen_rates_conf" && exit 1; }
+test "$2" == "-c" && htb_gen_rates_conf="$3"
+
+function load_conf () { #loads htb-gen-rates.conf in global vars for furter use
+local n=0  line= total_ceil= remaining_rate=
+for ((if=0;if<${#ifaces[@]};if++)); do
+	total_ceil[if]=0; remaining_rate[if]=${total_rate[if]}
+	class_parent[if]=$((class_start++))
+done
+while read line ;do
+	#read -a & ${line[x]} is another way, but this is eye cleanner :-)
+	set -- $line 
+	test -z "${1##\#*}" && continue # skip commented lines
+	test -z "${14}" && continue # skip blank/bad writen lines
+	#set -x
+	ip[n]=$1; rate_down[n]=$2; ceil_down[n]=$3; rate_up[n]=$4; ceil_up[n]=$5; 
+	iface_down[n]=$6; iface_up[n]=$7; ceil_dfl_percent[n]=$8; 
+	tcp_prio_ports[n]=$9; udp_prio_ports[n]=${10} prio_protos[n]=${11}; prio_helpers[n]=${12}; 
+	enabled[n]=${13}; name_client[n]={14}
+	# assing default values(could be donde elswere more eff. but clear here):
+	test ${ceil_dfl_percent[n]} == 0 && ceil_dfl_percent[n]=$default_ceil_dfl_percent
+	test ${tcp_prio_ports[n]} == 0 && tcp_prio_ports[n]=$default_tcp_prio_ports
+	test ${udp_prio_ports[n]} == 0 && udp_prio_ports[n]=$default_udp_prio_ports
+	test ${prio_protos[n]} == 0 && prio_protos[n]=$default_prio_protos
+	test ${prio_helpers[n]} == 0 && prio_helpers[n]=$default_prio_helpers
+	for ((if=0;if<${#ifaces[@]};if++)); do # iface name->number conversion
+        	test "${ifaces[if]}" == "${iface_down[n]}" && if_d=$if
+	        test "${ifaces[if]}" == "${iface_up[n]}" && if_u=$if
+	done
+	if [[ "${enabled[n]}" == "0" ]];then
+		let n++ 
+		continue 
+	fi
+	# consecutive class/mark value assignation, begining from class_start
+	class[n]=$((class_start++)) 
+	class_prio[n]=$((class_start++))
+	class_dfl[n]=$((class_start++))
+	# let(built-in) do not work with arrays in bash<3 
+	remaining_rate[if_d]=$((${remaining_rate[if_d]}-${rate_down[n]})) #calc remaining rate
+	remaining_rate[if_u]=$((${remaining_rate[if_u]}-${rate_up[n]})) #calc remaining rate
+	#give/grant $rate_granted kbits per "0 rate" class, stolen from total_rate
+	test ${rate_down[n]} == 0 \
+		&& remaining_rate[if_d]=$((${remaining_rate[if_d]}-$rate_granted)) \
+		&& total_ceil[if_d]=$((${total_ceil[if_d]}+${ceil_down[n]}))
+	test ${rate_up[n]} == 0 \
+		&& remaining_rate[if_u]=$((${remaining_rate[if_u]}-$rate_granted)) \
+		&& total_ceil[if_u]=$((${total_ceil[if_u]}+${ceil_up[n]}))
+	# some safe tests, boring, but newbie's trap
+	test ${remaining_rate[if_d]} -ge 0 || { echo "check rates conf, not enough bandwidth in ${ifaces_name[if_d]}" && exit 1; }
+	test ${remaining_rate[if_u]} -ge 0 || { echo "check rates conf, not enough bandwidth in ${ifaces_name[if_u]}" && exit 1; }
+	test ${total_rate[if_d]}     -ge ${ceil_down[n]} || { echo "check rates conf, ${ip[n]} max can't be bigger than ${total_rate[if_d]}" && exit 1; }
+	test ${total_rate[if_u]}     -ge ${ceil_up[n]} || { echo "check rates conf, ${ip[n]} max can't be bigger than ${total_rate[if_u]}" && exit 1; }
+	let n++
+	#echo ${ifaces[if_u]} total_rate=${total_rate[if_u]} remaining_rate=${remaining_rate[if_u]} total_ceil=${total_ceil[if_u]}
+	#echo ${ifaces[if_d]} total_rate=${total_rate[if_d]} remaining_rate=${remaining_rate[if_d]} total_ceil=${total_ceil[if_d]}
+done <$htb_gen_rates_conf 
+#$(sort  -t. -n -k1,1d -k2,2 -k3,3 -k4,4 $htb_gen_rates_conf) 
+for ((n=0;n<${#ip[@]};n++)); do
+	test "${enabled[n]}" == "0" && continue
+	# search key(by name) in the iface's array 
+	for ((if=0;if<${#ifaces[@]};if++)); do # iface name->number conversion
+		test "${ifaces[if]}" == "${iface_down[n]}" && if_d=$if
+		test "${ifaces[if]}" == "${iface_up[n]}" && if_u=$if
+	done
+	# fair auto ceil2rate percent assignation (+rate_granted, more impact in small classes)
+	if [[ ${rate_down[n]} == 0 ]];then
+		auto_rate_down[n]=1
+		rate_down[n]=$((${remaining_rate[if_d]}>${total_ceil[if_d]}?${ceil_down[n]}:${ceil_down[n]}*${remaining_rate[if_d]}/${total_ceil[if_d]}+rate_granted))
+	fi
+	if [[ ${rate_up[n]} == 0 ]];then
+		auto_rate_up[n]=1
+		rate_up[n]=$((${remaining_rate[if_u]}>${total_ceil[if_u]}?${ceil_up[n]}:${ceil_up[n]}*${remaining_rate[if_u]}/${total_ceil[if_u]}+rate_granted))
+	fi
+done
+}
+
+
+function do_tc () {
+#set -x
+	function __do_tc () { 
+	local mode=$1 ip=${2/\//_} rate=$3 ceil=$4 burst=$5 class=$6 parent=${7##*:} iface=$8 prio=$9 
+	local quantum=$((rate*1024/8/r2q<mtu?mtu:rate*1024/8/r2q))
+	case "$mode" in 
+	root)	$tc_command qdisc del dev $iface root 2>/dev/null
+		tc qdisc add dev $iface root handle 1 htb default 0 r2q $r2q
+		;;
+	parent) tc class add dev $iface parent 1:${parent} classid 1:${class} htb rate ${rate}kbit ceil ${ceil}kbit burst ${burst}k quantum $quantum
+		;;
+	leaf)	tc class add dev $iface  parent 1:${parent} classid 1:${class} htb rate ${rate}kbit ceil ${ceil}kbit burst ${burst}k prio $prio quantum $quantum
+		if [[ $prio == 1 ]] ; then
+			tc qdisc add dev $iface parent 1:${class} handle ${class} pfifo
+		else
+			tc qdisc add dev $iface parent 1:${class} handle ${class} sfq perturb 10
+		fi	
+		tc filter add dev $iface parent 1:0 protocol ip prio 200 handle ${class} fw classid 1:${class}
+		;;
+	esac
+	}
+	function _do_tc () { 
+	for ((if=0;if<${#ifaces[@]};if++)); do
+		local rdp=$rate_dfl_percent;
+		__do_tc "root"    false    false              false              false ${class_parent[if]} false ${ifaces[if]} false
+		__do_tc "parent" "clients" ${total_rate[if]}  ${total_rate[if]}  24    ${class_parent[if]} ""    ${ifaces[if]} false
+		for ((n=0;n<${#ip[@]};n++)); do
+			test "${enabled[n]}" == "0" && continue 
+			# WARNING: you will need a widescreen monitor to read/understand this... ;-)
+			# although do some alias for readability (my widescreen monitor is not that wide! :-/
+		#	set -x
+			local c_prio=${class_prio[n]};c_dfl=${class_dfl[n]}
+			local _ip=${ip[n]};r_d=${rate_down[n]};r_u=${rate_up[n]};c_d=${ceil_down[n]};c_u=${ceil_up[n]};cdp=${ceil_dfl_percent[n]}
+			#params: type               ip  rate                       ceil          burst class             class_parent            iface       prio 
+			if [[ ${ifaces[if]} == ${iface_down[n]} ]];then
+				__do_tc "parent" $_ip $r_d                       $c_d             24 ${class[n]}  ${class_parent[if]}           ${iface_down[n]} false
+				__do_tc "leaf"   $_ip $((r_d*(100-rdp)/100))     $c_d             24 $c_prio    ${class_parent[if]}:${class[n]} ${iface_down[n]}     1
+				__do_tc "leaf"   $_ip $((r_d-r_d*(100-rdp)/100)) $((c_d*cdp/100)) 12 $c_dfl     ${class_parent[if]}:${class[n]} ${iface_down[n]}     3
+			fi
+			if [[ ${ifaces[if]} == ${iface_up[n]} ]];then
+				__do_tc "parent" $_ip $r_u                       $c_u             24 ${class[n]}  ${class_parent[if]}           ${iface_up[n]} false
+				__do_tc "leaf"   $_ip $((r_u*(100-rdp)/100))     $c_u             24 $c_prio    ${class_parent[if]}:${class[n]} ${iface_up[n]}     1
+				__do_tc "leaf"   $_ip $((r_u-r_u*(100-rdp)/100)) $((c_u*cdp/100)) 12 $c_dfl     ${class_parent[if]}:${class[n]} ${iface_up[n]}     3
+			fi
+		#	set +x
+		done
+	done
+	}
+if [[ "$1" == "stdout" ]] ;then
+	tc () { echo tc "$@"; }
+	_do_tc
+else
+	tc () {	echo "$@" ; }
+	$tc_command -b - <<-EOF 
+	$(_do_tc)
+	EOF
+fi
+}
+
+function do_iptables() {
+	function _do_iptables () {
+		function __do_iptables () {
+		local dir=$1 iface=$2 ip=$3 class_prio=$4 class_dfl=$5 tcp_prio_ports=$6 udp_prio_ports=$7 prio_protos=$8 prio_helpers=$9 
+		local host_dir= ports_dir=
+		case "$dir" in down) host_dir=d;ports_dir=s ;; up) host_dir=s;ports_dir=d ;;esac	
+		# iptables accept either "." & "/" chars in table naiming, is my lucky day :-) !
+		iptables -t mangle -N htb-gen.${iface}-${ip} 
+		iptables -t mangle -A htb-gen.${iface} -${host_dir} ${ip} -j htb-gen.${iface}-${ip}
+		iptables -t mangle -A htb-gen.${iface}-${ip} -m mark --mark 0 -m length --length 0:100 -j MARK --set-mark ${class_prio} 
+		local IFS=","
+		for proto in ${prio_protos}; do 
+			iptables -t mangle -A htb-gen.${iface}-${ip} -m mark --mark 0 -p ${proto} -j MARK --set-mark ${class_prio}
+		done
+		for helper in ${prio_helpers}; do 
+			iptables -t mangle -A htb-gen.${iface}-${ip} -m mark --mark 0 -m helper --helper ${helper} -j MARK --set-mark ${class_prio}
+		done
+		unset IFS
+		if [ "$tcp_prio_ports" != 0 ]; then 
+			iptables -t mangle -A htb-gen.${iface}-${ip} -m mark --mark 0 -p tcp -m multiport --${ports_dir}ports $tcp_prio_ports -j MARK --set-mark ${class_prio}
+		fi
+		if [ "$udp_prio_ports" != 0 ]; then 
+			iptables -t mangle -A htb-gen.${iface}-${ip} -m mark --mark 0 -p udp -m multiport --${ports_dir}ports $udp_prio_ports -j MARK --set-mark ${class_prio}
+		fi
+		iptables -t mangle -A htb-gen.${iface}-${ip} -m mark --mark 0 -j MARK --set-mark ${class_dfl} 
+		iptables -t mangle -A htb-gen.${iface}-${ip} -j ACCEPT 
+	    }
+	# Make extra tables, cleaner & target match faster
+	for ((if=0;if<${#ifaces[@]};if++)); do
+		iptables -t mangle -N htb-gen.${ifaces[if]} 
+		iptables -t mangle -A FORWARD -o ${ifaces[if]} -j htb-gen.${ifaces[if]}
+		iptables -t mangle -A OUTPUT  -o ${ifaces[if]} -j htb-gen.${ifaces[if]}
+		for ((n=0;n<${#ip[@]};n++)); do
+			test "${enabled[n]}" == "0" && continue 
+			if [[ ${ifaces[if]} == ${iface_down[n]} ]];then
+				__do_iptables "down" ${ifaces[if]} ${ip[n]} ${class_prio[n]} ${class_dfl[n]} ${tcp_prio_ports[n]} ${udp_prio_ports[n]} ${prio_protos[n]} ${prio_helpers[n]}
+			fi
+			if [[ ${ifaces[if]} == ${iface_up[n]} ]];then
+				__do_iptables "up" ${ifaces[if]} ${ip[n]} ${class_prio[n]} ${class_dfl[n]} ${tcp_prio_ports[n]} ${udp_prio_ports[n]} ${prio_protos[n]} ${prio_helpers[n]}
+			fi
+		done	
+	done
+	}
+#function begins here!
+if [[ "$1" == "stdout" ]] ;then
+	iptables () { echo iptables "$@"; }
+	_do_iptables
+else
+	#delete old htb-gen entries(chains)
+	for ((if=0;if<${#ifaces[@]};if++)); do
+		$iptables_command -t mangle -D FORWARD -o ${ifaces[if]} -j htb-gen.${ifaces[if]} 2>/dev/null
+		$iptables_command -t mangle -D OUTPUT  -o ${ifaces[if]} -j htb-gen.${ifaces[if]} 2>/dev/null
+	done
+	while read line ;do
+		test -z "${line##:htb-gen*}" || continue # filter htb-gen chains only
+		chain=(${line/:/})
+		$iptables_command -t mangle -F $chain
+		$iptables_command -t mangle -X $chain
+	done <<-EOF
+	$($iptables_save_command)
+	EOF
+	#hack to echo an iptables-restore file, but i can steel write 
+	#normal/readable iptables rules
+	iptables () {
+	case "$3" in 
+	-A|-I) 	shift 2
+			echo "$@" 
+				;;
+	-N)   	echo ":${4} - [0:0]" 
+				;;
+	esac
+	}
+	$iptables_restore_command -n <<-EOF 
+	*mangle
+	$(_do_iptables)
+	COMMIT
+	EOF
+fi
+}
+
+case "$1" in 
+all|tc)
+	load_conf
+	test "$1" == "all" && do_iptables 
+	do_tc  
+	;;
+tc_stdout)
+	load_conf
+	do_tc "stdout" 
+	;;
+iptables)
+	load_conf
+	do_iptables 
+	;;
+iptables_stdout)	
+	load_conf 
+	do_iptables "stdout" 
+	;;
+loadvars)
+	load_conf
+	;;
+*)	cat <<-EOF
+	Usage: 
+	$0 all             #execs tc rules & firewall rules
+	$0 tc              #execs tc rules only (no firewall)
+	$0 tc_stdout       #print tc rules to stdout 
+	$0 iptables        #execs firewall rules only (call it from your firewall script)
+	$0 iptables_stdout #print firewall rules to stdout (put them wherever you want) 
+	$0 loadvars        #for outside scripting & automation, see README for details 
+	EOF
+	;;
+esac

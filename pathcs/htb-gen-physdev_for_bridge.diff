@@ -1,0 +1,25 @@
+--- htb-gen.orig	2006-08-28 15:23:29.000000000 -0300
++++ htb-gen	2006-08-28 15:26:29.000000000 -0300
+@@ -153,9 +153,9 @@
+ 	    }
+ 	# Make extra tables, cleaner & target match faster
+ 	iptables -t mangle -N htb-gen.down 
+-	iptables -t mangle -A FORWARD -o ${iface_down} -j htb-gen.down
++	iptables -t mangle -A FORWARD -m physdev --physdev-out ${iface_down} -j htb-gen.down
+ 	iptables -t mangle -N htb-gen.up 
+-	iptables -t mangle -A FORWARD -o ${iface_up} -j htb-gen.up
++	iptables -t mangle -A FORWARD -m physdev --physdev-out ${iface_up} -j htb-gen.up
+ 	
+ 	for ((n=0;n<${#ip[@]};n++)); do
+ 		__do_iptables "down" ${ip[n]} ${class_prio_down[n]} ${class_dfl_down[n]}
+@@ -168,8 +168,8 @@
+ 	_do_iptables
+ else
+ 	#delete old htb-gen entries(chains)
+-	iptables -t mangle -D FORWARD -o ${iface_down} -j htb-gen.down 2>/dev/null
+-	iptables -t mangle -D FORWARD -o ${iface_up} -j htb-gen.up 2>/dev/null
++	iptables -t mangle -D FORWARD -m physdev --physdev-out ${iface_down} -j htb-gen.down 2>/dev/null
++	iptables -t mangle -D FORWARD -m physdev --physdev-out ${iface_up} -j htb-gen.up 2>/dev/null
+ 	while read line ;do
+ 		test -z "${line##:htb-gen*}" || continue # filter htb-gen chains only
+ 		chain=(${line/:/})

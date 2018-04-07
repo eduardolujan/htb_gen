@@ -1,0 +1,26 @@
+FAQ
+
+Q1: The bandwidth distribution seems to does not work at all
+A1: -Check that htb classes are working
+     tc -s class show dev $iface
+     watch -n1 -d "tc -s class show dev $iface |egrep -A4 $class" 
+     #where $iface is the iface you are looking for
+     #and $class is the class you are looking for
+     
+     Or you can download jjo's htb-stats.sh script. It will show 
+     real time bandwidth usage per class/host in a very fancy way.
+     http://www.lugmen.org.ar/~jjo/jjotip/htb/htb-stats.sh
+    
+    -Check that the iptables rules are appling and the packets get marked
+     iptables -t mangle -F #to be shure you dont have any rule that conflict
+     htb-gen iptables_only  #re-insert the firwall rules
+     iptables -t mangle -nvL FORWARD 
+     watch -n1 -d "iptables -t mangle -nvL $host.down"
+     watch -n1 -d "iptables -t mangle -nvL $host.up"
+     #where $host is the host your are looking for
+   
+    -Chek that you haven't LIED in your 
+     'total_rate_down' and 'total_rate_up' settings
+     Or that your internet provider have doesn't.
+     Try reduce the total_rates vars and check again. Wired things can happen
+     if htb thinks that he has more bw than real.
